@@ -4,64 +4,54 @@
 
 #include "ortools/linear_solver/linear_solver.h"
 
+#include <algorithm>
+#include <functional>
 #include <iostream>
+#include <sstream>
 #include <locale>
 #include <stdio.h>
+#include <utility>
 
 using namespace std;
 using namespace operations_research;
 
-int main(int argc, char** argv)
+typedef struct {
+	float recipes[RECIPE_SIZE] = {0};
+	float resources[RESOURCE_SIZE] = {0};
+	float value = 0;
+} solution;
+
+string toString(const solution& sol)
 {
-	cout << "hello world!" << endl;
-	
-	// Number formatting
-	cout.imbue(locale(""));
-	cout << setprecision(3) << fixed << endl;
-	
-	// Option parsing
-	bool verbose = false;
-	bool nuclear = false;
-	int opt;
-	while((opt = getopt (argc, argv, "nv")) != -1)
+	stringstream ss;
+	ss.imbue(locale(""));
+	ss << setprecision(3) << fixed;
+	ss << "recipe usage (buildings):" << endl;
+	for(size_t index = 0; index < RECIPE_SIZE; ++index)
 	{
-		switch(opt)
+		if( sol.recipes[index] > 0.1 )
 		{
-			case 'n':
-				nuclear = true;
-			break;
-			case 'v':
-				verbose = true;
-			break;
-			case '?':
-				cout << "USAGE: optimizer [-n] [-v]" << endl;
-				cout << "-n allow nuclear power" << endl;
-				cout << "-v verbose debug logging" << endl;
-				exit(1);
+			ss << "  " << recipeToString(index) << ": " << sol.recipes[index] << endl;
 		}
 	}
-	
-	// Generate all recipes
-	RecipeBook recipes = generateRecipes();
-	// Disable nuclear power
-	if(!nuclear)
+
+	ss << "resources sunk (per min):" << endl;
+	for(size_t index = 0; index < RESOURCE_SIZE; ++index)
 	{
-		recipes[RECIPE_POWER_NUCLEAR_POWER_PLANT] = {};
-	}
-	// Debug output
-	if(verbose)
-	{
-		for(RecipeEntry recipe : recipes)
+		if( sol.resources[index] > 0.1 )
 		{
-			cout << recipeToString(recipe.first) << ":" << endl;
-			for(ResourceEntry resource : recipe.second)
-			{
-				cout << "  " << resourceToString(resource.first) << ": " << resource.second << endl;
-			}
+			ss << "  " << resourceToString(index) << ": " << sol.resources[index] << endl;
 		}
 	}
-	
-	cout << "configuring or-tools solver" << endl;
+
+	ss << "awesome points (per min): " << sol.value << endl;
+
+	return ss.str();
+}
+
+solution solve(RecipeBook recipes, vector<RecipeName> disabled, bool uranium, bool plutonium)
+{
+	//cout << "configuring or-tools solver" << endl;
 	// Basic solver using GLOP
 	MPSolver solver("satisfactory-optimizer", MPSolver::GLOP_LINEAR_PROGRAMMING);
 	
@@ -74,11 +64,33 @@ int main(int argc, char** argv)
 		vars[entry.first]->SetUB(entry.second);
 	}
 	
+	// Disable recipes passed in as disabled
+	for( RecipeName recipe : disabled )
+	{
+		vars[recipe]->SetUB(0);
+	}
+	
 	// Constraints ensure that all resources (including power) are non-negative
 	vector<MPConstraint*> constraints(RESOURCE_SIZE);
 	for(size_t resource_idx = 0; resource_idx < RESOURCE_SIZE; ++resource_idx)
 	{
-		constraints[resource_idx] = solver.MakeRowConstraint(0.0, MPSolver::infinity());
+		//TODO: fix up
+		if( !uranium && resource_idx == RESOURCE_URANIUM_WASTE )
+		{
+			constraints[resource_idx] = solver.MakeRowConstraint(0.0, 0.0);
+		}
+		else if( !plutonium && resource_idx == RESOURCE_PLUTONIUM_WASTE )
+		{
+			constraints[resource_idx] = solver.MakeRowConstraint(0.0, 0.0);
+		}
+		else if( resource_idx == RESOURCE_NON_FISSILE_URANIUM || resource_idx == RESOURCE_PLUTONIUM_PELLET || resource_idx == RESOURCE_ENCASED_PLUTONIUM_CELL )
+		{
+			constraints[resource_idx] = solver.MakeRowConstraint(0.0, 0.0);
+		}
+		else
+		{
+			constraints[resource_idx] = solver.MakeRowConstraint(0.0, MPSolver::infinity());
+		}
 	}
 	for(RecipeEntry recipe : recipes)
 	{
@@ -95,7 +107,7 @@ int main(int argc, char** argv)
 		float coefficient = 0.0;
 		for(ResourceEntry resource : recipe.second)
 		{
-			if(resource.first != RESOURCE_POWER)
+			if(resource.first != RESOURCE_POWER && resource.first != RESOURCE_URANIUM_WASTE && resource.first != RESOURCE_PLUTONIUM_WASTE)
 			{
 				coefficient -= resource.second;
 			}
@@ -117,54 +129,107 @@ int main(int argc, char** argv)
 	}
 	objective->SetMaximization();
 
-	cout << "running or-tools solver" << endl;
+	//cout << "running or-tools solver" << endl;
 	// Let it go
 	solver.Solve();
 	
-	// Print recipe usage
-	cout << "recipe usage (buildings):" << endl;
+	solution sol;
 	for(RecipeEntry recipe : recipes)
 	{
 		if( vars[recipe.first]->solution_value() > 0.1 )
 		{
-			cout << "  " << recipeToString(recipe.first) << ": " << vars[recipe.first]->solution_value() << endl;
+			sol.recipes[recipe.first] = vars[recipe.first]->solution_value();
+			for(ResourceEntry resource : recipe.second)
+			{
+				sol.resources[resource.first] += vars[recipe.first]->solution_value() * resource.second;
+			}
 		}
-	}
-
-	// Print resource production
-	vector<float> sunk(RESOURCE_SIZE,0.0);
-	for(RecipeEntry recipe : recipes)
-	{
-		for(ResourceEntry resource : recipe.second)
-		{
-			sunk[resource.first] += vars[recipe.first]->solution_value() * resource.second;
-		}
-	}
-	cout << "resources sunk (per min):" << endl;
-	for(size_t resource_idx = 0; resource_idx < RESOURCE_SIZE; ++resource_idx)
-	{
-		if(sunk[resource_idx] > 0.1)
-		{
-			cout << "  " << resourceToString(resource_idx) << ": " << sunk[resource_idx] << endl;
-		}
-	}
-
-	cout << "awesome points (per min): " << objective->Value() << endl;
+	}	
+	sol.value = objective->Value();
 	
+	return sol;
+}
+
+int main(int argc, char** argv)
+{
+	cout << "hello world!" << endl;
+	
+	// Number formatting
+	cout.imbue(locale(""));
+	cout << setprecision(3) << fixed << endl;
+	
+	// Option parsing
+	bool verbose = false;
+	bool uranium = false;
+	bool plutonium = false;
+	int opt;
+	while((opt = getopt (argc, argv, "upv")) != -1)
+	{
+		switch(opt)
+		{
+			case 'u':
+				uranium = true;
+			break;
+			case 'p':
+				plutonium = true;
+			break;
+			case 'v':
+				verbose = true;
+			break;
+			case '?':
+				cout << "USAGE: optimizer [-u] [-p] [-v]" << endl;
+				cout << "-u allow uranium waste" << endl;
+				cout << "-p allow plutonium waste" << endl;
+				cout << "-v verbose debug logging" << endl;
+				exit(1);
+		}
+	}
+	
+	double overclockLimestone = 2.0;
+	double overclockNitrogen = (uranium || plutonium) ? 1.0 : 2.0;
+	// Generate all recipes
+	RecipeBook recipes = generateRecipes(overclockLimestone, overclockNitrogen);
 	// Debug output
-	/*
-	ResourceName resource_idx = RESOURCE_IRON_INGOT;
-	cout << "Resource " << resourceToString(resource_idx) << " is in:" << endl;
-	for(RecipeEntry recipe : recipes)
+	if(verbose)
 	{
-		if(recipe.second.count(resource_idx) != 0 && vars[recipe.first]->solution_value() != 0)
+		for(RecipeEntry recipe : recipes)
 		{
-			float value = vars[recipe.first]->solution_value() * recipe.second[resource_idx];
-			cout << "  " << recipeToString(recipe.first) << ": " << value << endl;
+			cout << recipeToString(recipe.first) << ":" << endl;
+			for(ResourceEntry resource : recipe.second)
+			{
+				cout << "  " << resourceToString(resource.first) << ": " << resource.second << endl;
+			}
 		}
 	}
-	*/
 	
+	solution sol = solve(recipes, vector<RecipeName>(), uranium, plutonium);
+	
+	cout << toString(sol) << endl;
+	
+	vector< pair<RecipeName, float> > recipeImpact;
+	for( size_t index = RECIPE_FIRST_STANDARD; index < RECIPE_SIZE; ++index )
+	{
+		float deprivedValue = solve(recipes, {(RecipeName)index}, uranium, plutonium).value;
+		float impact = (sol.value - deprivedValue) / sol.value;
+		recipeImpact.push_back( make_pair<RecipeName, float>((RecipeName)index, std::move(impact)) );
+	}
+	std::sort(
+		std::begin(recipeImpact), 
+		std::end(recipeImpact), 
+		[](const pair<RecipeName, float>& a, const pair<RecipeName, float>& b)
+		{
+			return a.second > b.second;
+		}
+	);
+	cout << "recipe impact:" << endl;
+	for( pair<RecipeName, float> entry : recipeImpact )
+	{
+		if( sol.recipes[entry.first] > 0.01 )
+		{
+			cout << "  " << recipeToString(entry.first) << ": " << entry.second << endl;
+		}
+	}
+
 	cout << "goodbye world!" << endl;
 	return 0;
 }
